@@ -3,136 +3,113 @@ import WebGUI
 import HAL
 import Frequency
 
-# ---------- Parámetros ----------
-VEL_MAX = 8.5        # velocidad lineal máxima (m/s), la que lleva en recta libre
-VEL_MIN = 2.5        # velocidad lineal mínima: nunca baja de aquí para no perder tiempo
-GIRO_MAX = 3.0       # velocidad angular máxima (rad/s)
-GANANCIA_GIRO = 2.0  # cuánto gira por cada radián de error entre el rumbo y la fuerza resultante
-SUAVIZADO = 0.3      # peso del giro anterior: 0 = sin suavizar, 1 = el giro nunca cambia
-ALCANCE = 3.0        # más allá de esta distancia (m) un obstáculo no repele
-PESO_REP = 8.0       # peso de la repulsión frente a la atracción (que vale 1)
-DIST_FRENO = 3.0     # a menos distancia frontal que esta (m) el coche empieza a frenar
-REP_MAX = 2.0        # tope de la repulsión lateral, para que no reaccione de forma exagerada
-FILTRO_REP = 0.5     # suaviza la repulsión entre iteraciones (0 = sin filtrar)
-AMORTIGUACION = 1.5  # término derivativo del giro: frena el giro si el ángulo ya cambia rápido
-AVANCE_MIN = 0.6     # mínimo de la componente de avance; más alto = ángulos menos bruscos
-RADIO_META = 3.0     # a esta distancia (m) se da el subobjetivo por alcanzado
+# Variables
+VEL_MAX = 12.0        # velocidad lineal máxima
+VEL_MIN = 2.5         # velocidad lineal mínima
+W_MAX = 3.0           # velocidad angular máxima
+K_GIRO = 2.0          # la ganancia proporcional, giro por cada radian de error
+AMORTIGUACION = 1.5   # frena el giro si el ángulo se cambia rápido
+INERCIA_W = 0.3       # es el peso del giro anterior
+ALCANCE = 5.0         # el radio del láser, los obstáculos más lejanos que este valor no repelen
+K_REPULSION = 8.0     # el peso de la repulsión frente a la atracción
+TOPE_REPULSION = 2.0  # límite de la repulsión lateral para que no reaccione de más
+DIST_FRENO = 3.0      # si llega a haber algo delante a menos de este valor, empieza a frenar
+DIST_META = 3.0       # a esta distancia damos el subobjetivo como alcanzado
 
 
-# ---------- Láser ----------
-def leer_distancias(laser):
-    # Devuelve las 180 distancias del láser. Las lecturas inválidas
-    # (None, NaN o <= 0) se tratan como "sin obstáculo" (infinito)
-    dist = []
-    for i in range(180):
-        d = laser.values[i]
-        if d is None or math.isnan(d) or d <= 0:
-            d = float('inf')
-        dist.append(d)
-    return dist
-
-
-# ---------- Fuerza atractiva (vector unitario hacia el subobjetivo) ----------
-def a_relativas(x, y, rx, ry, yaw):
-    # Pasa un punto de coordenadas absolutas (mapa) a coordenadas del coche:
-    # primero se resta la posición del coche y luego se rota según su orientación.
-    # En el sistema del coche: x = hacia delante, y = hacia la izquierda
-    dx, dy = x - rx, y - ry
-    return (dx * math.cos(yaw) + dy * math.sin(yaw),
-            -dx * math.sin(yaw) + dy * math.cos(yaw))
-
-
-def atraccion(target, pose):
-    # Devuelve la dirección hacia el subobjetivo (módulo 1) y la distancia a él.
-    # Se normaliza para que la fuerza no dependa de lo lejos que esté el punto
-    p = target.getPose()
-    x, y = a_relativas(p.x, p.y, pose.x, pose.y, pose.yaw)
-    d = math.hypot(x, y)
-    if d == 0:
-        return 0.0, 0.0, 0.0
-    return x / d, y / d, d
-
-
-# ---------- Fuerza repulsiva (1/d² de cada rayo) ----------
-def repulsion(dist):
-    # Cada rayo con obstáculo cercano empuja al coche en sentido contrario a su dirección.
-    # Se usa 1/d² para que lo cercano repela mucho más que lo lejano
-    fx = fy = 0.0
-    for i in range(180):
-        d = dist[i]
-        if d < ALCANCE:
-            d = max(d, 0.15)                # evita dividir por casi cero
-            ang = math.radians(i - 90)      # 0 = frente, positivo = izquierda
-            m = 1.0 / (d * d)               # módulo de la repulsión de este rayo
-            fx -= m * math.cos(ang)         # el signo menos: empuja alejándose del obstáculo
-            fy -= m * math.sin(ang)
-    # Se divide entre 60 para escalar la suma y se pondera con PESO_REP
-    return PESO_REP * fx / 60, PESO_REP * fy / 60
-
-
-# ---------- Bucle principal ----------
-w_ant = 0.0          # velocidad angular de la iteración anterior (para suavizar)
-ang_ant = 0.0        # ángulo de la fuerza en la iteración anterior (para la derivada)
-rep_filtrada = 0.0   # repulsión lateral filtrada
-lado = 1             # lado preferido si hay indecisión (1 = izquierda, -1 = derecha)
+# Variables de la iteración anterior 
+w_ant = 0.0
+error_ant = 0.0
 
 while True:
     Frequency.tick()
 
-    target = WebGUI.getNextTarget()     # siguiente subobjetivo (coordenadas absolutas)
+    objetivo = WebGUI.getNextTarget()     # el subobjetivo en coordenadas absolutas
     laser = HAL.getLaserData()
-    pose = HAL.getPose3d()
+    coche = HAL.getPose3d()
 
     if len(laser.values) >= 180:
-        dist = leer_distancias(laser)
-        d_frente = min(dist[75:106])    # distancia mínima en ±15° al frente
+        # Si hay una lectura que no es válida se trata como si no hubiera 
+        # obstáculo
+        lecturas = [float('inf') if (d is None or math.isnan(d) or d <= 0) else d
+                for d in laser.values[:180]]
 
-        # 1. Fuerzas
-        ax, ay, d_meta = atraccion(target, pose)
-        rx, ry = repulsion(dist)
+        # Hacemos la distancia mínima en la zona frontal, unos +- 15 grados
+        dist_delante = min(lecturas[75:106])
 
-        # 2. Combinación.
-        # La repulsión suele apuntar hacia atrás (el láser solo mira al frente),
-        # así que no se suma a la componente de avance: esta la marca solo la
-        # atracción (con un mínimo). La repulsión solo influye en el giro (eje y)
-        ry = max(-REP_MAX, min(REP_MAX, ry))                      # tope
-        rep_filtrada = FILTRO_REP * rep_filtrada + (1 - FILTRO_REP) * ry   # filtro paso bajo
-        fx = max(ax, AVANCE_MIN)
-        fy = ay + rep_filtrada
+        # -- Fuerza atractiva
+        # La diferencia entre la posición del subobjetivo y la del coche
+        pos_obj = objetivo.getPose()
+        dif_x = pos_obj.x - coche.x
+        dif_y = pos_obj.y - coche.y
 
-        # 3. Indecisión: si hay algo delante y las fuerzas laterales se anulan,
-        # el coche iría de frente al obstáculo. Se fuerza un giro hacia el lado con más hueco
-        if d_frente < 1.0 and abs(fy) < 0.05:
-            izq = sum(min(d, ALCANCE) for d in dist[110:150])
-            der = sum(min(d, ALCANCE) for d in dist[30:70])
-            # histéresis: solo cambia de lado si la diferencia es clara, para no oscilar
-            if izq > der + 3.0:
-                lado = 1
-            elif der > izq + 3.0:
-                lado = -1
-            fy = 0.5 * lado
+        # Rotamos la diferencia para pasarla a los ejes del coche
+        # siendo x al frente e y a la izquierda
+        atr_x = dif_x * math.cos(coche.yaw) + dif_y * math.sin(coche.yaw)
+        atr_y = dif_x * math.sin(coche.yaw) + dif_y * math.cos(coche.yaw)
 
-        # 4. Dirección de la fuerza resultante respecto al frente del coche
-        angulo = math.atan2(fy, fx)
+        # Normalizamos la dirección para que no dependa de lo lejos que esté el subobjetivo
+        dist_obj = math.hypot(atr_x, atr_y)
+        if dist_obj > 0:
+            atr_x, atr_y = atr_x / dist_obj, atr_y / dist_obj
 
-        # 5. Velocidad angular: proporcional al ángulo + término derivativo,
-        # limitada y suavizada con el giro anterior para evitar zigzag
-        w = GANANCIA_GIRO * angulo + AMORTIGUACION * (angulo - ang_ant)
-        w = max(-GIRO_MAX, min(GIRO_MAX, w))
-        ang_ant = angulo
-        w = SUAVIZADO * w_ant + (1 - SUAVIZADO) * w
+        
+        # -- Fuerza repulsiva
+        # Cada rayo del láser que detecte algo cerca empuja al coche en sentido contrario
+        # La intensidad es de 1 / distancia^2, para que lo cercano pese mucho más que lo lejano
+        rep_x = 0.0
+        rep_y = 0.0
+        for i, d in enumerate(lecturas):
+            if d < ALCANCE:
+                ang_rayo = math.radians(i - 90)     # 0 = frente; positivo = izq
+                intensidad = 1.0 / max(d, 0.15) ** 2    # el máx evita dividir por -0
+                rep_x -= intensidad * math.cos(ang_rayo)
+                rep_y -= intensidad * math.sin(ang_rayo)
+
+        # Escalamos la suma y limitamos el componente lateral
+        rep_x = K_REPULSION * rep_x / 60
+        rep_y = K_REPULSION * rep_y / 60
+        rep_y = max(-TOPE_REPULSION, min(TOPE_REPULSION, rep_y))
+
+
+        # -- Fuerza resultante
+        # La repulsión hace que el avance, el cual es marcado por la atracción
+        # La repulsión solo influye en el giro, el eje y
+        fuerza_x = max(atr_x, 0.6)
+        fuerza_y = atr_y + rep_y
+
+        # Si hay un obstáculo justo delante suya, las fuerzas laterales se anulan
+        # así que se gira hacia el lado donde haya más hueco
+        if dist_delante < 1.0 and abs(fuerza_y) < 0.05:
+            h_izq = sum(min(d, ALCANCE) for d in lecturas[110:150])
+            h_der = sum(min(d, ALCANCE) for d in lecturas[30:70])
+            fuerza_y = 0.5 if h_izq > h_der else -0.5
+
+        # El ángulo de la fuerza resultante respecto al frente del coche
+        angulo = math.atan2(fuerza_y, fuerza_x)
+
+
+        # -- Velocidad angular W
+        w = K_GIRO * angulo + AMORTIGUACION * (angulo - error_ant)
+        w = max(-W_MAX, min(W_MAX, w))
+        w = INERCIA_W * w_ant + (1 - INERCIA_W) * w
+        error_ant = angulo
         w_ant = w
 
-        # 6. Velocidad lineal: baja si hay que girar mucho o hay algo delante
+
+        # -- Velocidad lineal, baja al girar y cuanto más cerca haya algo delante
         por_giro = 1.0 - 0.6 * min(abs(angulo) / (math.pi / 2), 1.0)
-        por_frente = min(1.0, d_frente / DIST_FRENO) ** 2
+        por_frente = min(1.0, dist_delante / DIST_FRENO) ** 2
         v = max(VEL_MIN, VEL_MAX * por_giro * por_frente)
 
         HAL.setV(v)
         HAL.setW(w)
-        # Verde: atracción, rojo: repulsión, negro: resultante
-        WebGUI.showForces([ax, ay], [rx, rep_filtrada], [fx, fy])
 
-        # 7. Subobjetivo alcanzado: se marca sin parar el coche y se pasa al siguiente
-        if d_meta < RADIO_META:
-            target.setReached(True)
+        # Dibujamos las tres fuerzas en la interfaz, la atractiva, la repulsiva y la resultante
+        WebGUI.showForces([atr_x, atr_y], [rep_x, rep_y], [fuerza_x, fuerza_y])
+
+        # Si el subobjetivo ha sido alcanzado se marca sin parar el coche y se pasa al siguiente
+        if dist_obj < DIST_META:
+            objetivo.setReached(True)
+
+
