@@ -12,7 +12,7 @@ VALOR_CARRETERA = 255
 M_POR_CELDA = 1.25     # metros por celda (500 m / 400 celdas)
 
 # Campo: engordado de obstáculos y penalización por cercanía
-N_CELDAS = 3           # celdas que se engordan los obstáculos
+N_CELDAS = 4           # celdas que se engordan los obstáculos
 R_PEN = 12             # radio de la penalización (celdas)
 PESO_PEN = 0.7         # pendiente de la penalización (< 1)
 
@@ -23,12 +23,12 @@ PUSH_PASOS = 3         # máximo que se aparta cada punto (celdas)
 
 # Velocidad lineal
 V_MAX = 25.0
-A_LAT = 6.0            # aceleración lateral admisible (sube = curvas más rápidas)
+A_LAT = 6.5            # aceleración lateral admisible (sube = curvas más rápidas)
 A_FRENO = 6.0          # deceleración supuesta (baja = frena antes)
 V_FIN = 2.0            # velocidad al llegar al destino
 K_V = 0.8              # frenada extra según el error de ángulo
 DV_SUBE = 0.3          # aumento máximo de V por iteración
-V_ESPACIO_MIN = 3.0    # velocidad máxima pegado a la pared
+V_ESPACIO_MIN = 5.0    # velocidad máxima pegado a la pared ESTABA EN 3.0
 K_ESPACIO = 4.0        # m/s extra por cada celda de holgura
 
 # Punto de mira (metros): LOOK_MIN + LOOK_K * V, con tope LOOK_MAX
